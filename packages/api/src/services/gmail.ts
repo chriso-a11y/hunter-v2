@@ -1,4 +1,6 @@
 import { google } from 'googleapis';
+import pdfParse from 'pdf-parse';
+import mammoth from 'mammoth';
 import { normalizePhone } from './sms.js';
 
 function getOAuth2Client() {
@@ -16,6 +18,50 @@ function getGmail() {
   return google.gmail({ version: 'v1', auth: getOAuth2Client() });
 }
 
+async function fetchAttachmentText(
+  messageId: string,
+  attachmentId: string,
+  mimeType: string
+): Promise<string> {
+  try {
+    const gmail = getGmail();
+    const res = await gmail.users.messages.attachments.get({
+      userId: 'me',
+      messageId,
+      id: attachmentId,
+    });
+
+    const b64 = res.data.data;
+    if (!b64) return '';
+
+    // Gmail uses URL-safe base64; convert to standard before creating a Buffer
+    const standard = b64.replace(/-/g, '+').replace(/_/g, '/');
+    const buffer = Buffer.from(standard, 'base64');
+
+    if (mimeType.includes('pdf')) {
+      const result = await pdfParse(buffer);
+      return result.text ?? '';
+    }
+
+    if (
+      mimeType.includes('msword') ||
+      mimeType.includes('wordprocessingml.document')
+    ) {
+      const result = await mammoth.extractRawText({ buffer });
+      return result.value ?? '';
+    }
+
+    if (mimeType.includes('text/plain')) {
+      return buffer.toString('utf8');
+    }
+
+    return '';
+  } catch (err) {
+    console.error(`fetchAttachmentText error (attachmentId=${attachmentId}, mimeType=${mimeType}):`, err);
+    return '';
+  }
+}
+
 export async function watchInbox(): Promise<{ historyId: string; expiration: string }> {
   const gmail = getGmail();
   const res = await gmail.users.watch({
@@ -31,13 +77,20 @@ export async function watchInbox(): Promise<{ historyId: string; expiration: str
   };
 }
 
+export interface GmailAttachment {
+  filename: string;
+  mimeType: string;
+  data: string;
+  text: string;
+}
+
 export interface GmailMessage {
   id: string;
   threadId: string;
   from: string;
   subject: string;
   body: string;
-  attachments: Array<{ filename: string; mimeType: string; data: string }>;
+  attachments: GmailAttachment[];
 }
 
 export async function getNewMessages(historyId: string): Promise<GmailMessage[]> {
@@ -78,6 +131,19 @@ export async function getNewMessages(historyId: string): Promise<GmailMessage[]>
 
         const { body, attachments } = extractBodyAndAttachments(msg.payload as MessagePart | null);
 
+        // Fetch and extract text for document attachments
+        for (const attachment of attachments) {
+          const mt = attachment.mimeType.toLowerCase();
+          if (
+            mt.includes('pdf') ||
+            mt.includes('word') ||
+            mt.includes('document') ||
+            mt.includes('text/plain')
+          ) {
+            attachment.text = await fetchAttachmentText(msgId, attachment.data, mt);
+          }
+        }
+
         messages.push({ id: msgId, threadId: msg.threadId ?? '', from, subject, body, attachments });
       } catch (err) {
         console.error(`Failed to fetch message ${msgId}:`, err);
@@ -100,9 +166,9 @@ interface MessagePart {
 
 function extractBodyAndAttachments(
   payload: MessagePart | null | undefined
-): { body: string; attachments: Array<{ filename: string; mimeType: string; data: string }> } {
+): { body: string; attachments: GmailAttachment[] } {
   let body = '';
-  const attachments: Array<{ filename: string; mimeType: string; data: string }> = [];
+  const attachments: GmailAttachment[] = [];
 
   function walk(part: MessagePart): void {
     if (!part) return;
@@ -118,6 +184,7 @@ function extractBodyAndAttachments(
         filename: part.filename,
         mimeType,
         data: part.body.attachmentId,
+        text: '',
       });
     }
 
@@ -164,11 +231,17 @@ export function parseCandidate(msg: GmailMessage): ParsedCandidate {
     positionHint = 'Sales Rep';
   }
 
+  const attachmentTexts = msg.attachments
+    .filter((a) => a.text && a.text.length > 50)
+    .map((a) => `\n\n--- Resume (${a.filename}) ---\n${a.text}`)
+    .join('');
+  const resumeText = msg.body + attachmentTexts;
+
   return {
     name,
     email,
     phone,
-    resumeText: msg.body,
+    resumeText,
     rawEmail: raw,
     positionHint,
   };
