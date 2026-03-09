@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import { query, queryOne } from '../db/client.js';
 import { Candidate, Position } from '../db/types.js';
-import { getNewMessages, parseCandidate, sendEmail, GmailMessage } from '../services/gmail.js';
+import { getNewMessages, parseCandidate, sendEmail, watchInbox, GmailMessage } from '../services/gmail.js';
 import { sendSMS, logMessage, isOptOut, normalizePhone, getCandidateByPhone } from '../services/sms.js';
 import { scoreCandidate, extractContactInfo } from '../services/ai.js';
 import { handleInboundSMS } from '../services/conversation.js';
@@ -177,6 +177,25 @@ Hunter Jacobs
 Recruiting Coordinator
 Frontline Adjusters`;
 }
+
+// Gmail watch renewal — call weekly to keep push notifications active
+// Requires Bearer auth (applied at app level for non-webhook routes,
+// but we expose this here for convenience with a manual token check)
+webhooks.post('/gmail/watch', async (c) => {
+  const auth = c.req.header('Authorization') ?? '';
+  const password = process.env.AUTH_PASSWORD;
+  if (password && auth !== `Bearer ${password}`) {
+    return c.json({ error: 'Unauthorized' }, 401);
+  }
+  try {
+    const result = await watchInbox();
+    lastHistoryId = result.historyId;
+    return c.json({ ok: true, historyId: result.historyId, expiration: result.expiration });
+  } catch (err) {
+    console.error('watchInbox error:', err);
+    return c.json({ error: 'Failed to activate Gmail watch' }, 500);
+  }
+});
 
 // Twilio inbound SMS webhook
 webhooks.post('/twilio', async (c) => {
