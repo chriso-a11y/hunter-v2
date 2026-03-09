@@ -1,0 +1,10 @@
+[build]
+builder = "dockerfile"
+
+[[services]]
+name = "hunter-api"
+dockerfile = "Dockerfile.api"
+
+[[services]]
+name = "hunter-web"
+dockerfile = "Dockerfile.web"
