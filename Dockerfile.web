@@ -9,4 +9,7 @@ RUN pnpm --filter web build
 
 FROM nginx:alpine
 COPY --from=build /app/packages/web/dist /usr/share/nginx/html
+# Railway injects $PORT — nginx must listen on it
+RUN printf 'server {\n  listen %s;\n  root /usr/share/nginx/html;\n  index index.html;\n  location / { try_files $uri $uri/ /index.html; }\n}\n' "${PORT:-80}" > /etc/nginx/conf.d/default.conf
+CMD sh -c "sed -i \"s/listen .*/listen $PORT;/\" /etc/nginx/conf.d/default.conf && nginx -g 'daemon off;'"
 EXPOSE 80
