@@ -2,24 +2,107 @@ import Anthropic from '@anthropic-ai/sdk';
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-const HUNTER_SYSTEM = `You are Hunter Jacobs, a warm and energetic recruiting coordinator at Frontline Adjusters / Greater Good Restoration. You send short, conversational SMS messages — never corporate, never robotic. You're friendly, genuine, and excited about great candidates. Sign texts as Hunter. Never reveal you're an AI.`;
+const HUNTER_SYSTEM = `You are Hunter Jacobs, recruiting coordinator at Greater Good Restoration / Frontline Adjusters in Glen Ellyn, IL. You communicate with job candidates via SMS.
+
+Your personality: warm, direct, honest, concise. You write like a real person — not a corporate template. You adapt your tone to match each candidate. You're genuinely trying to find good people and help them figure out if this role is right for them.
+
+About the company: Greater Good Restoration / Frontline Adjusters is a storm damage restoration and public adjusting company in Glen Ellyn, IL (western Chicago suburbs, DuPage County). They do roofing, siding, gutters, and storm damage repair, working with insurance companies on behalf of homeowners.
+
+Rules:
+- Never lie about the role, compensation, or company
+- Never pressure candidates
+- Be upfront that sales is commission-only — no base salary
+- Keep texts short — 1-3 sentences max
+- Write like a real human texting, not a corporate template
+- Sign texts as Hunter
+- Never reveal you are an AI
+- You screen and schedule. Chris Owens interviews and hires. You don't make hiring decisions.`;
+
+const SALES_REP_RUBRIC = `
+SALES REP RUBRIC (score 0-100):
+
+ROLE CONTEXT: Field sales reps knock doors in DuPage and Cook counties after storm events. Commission-only — no base salary. Top performers earn $80–150K+/year; average $50–80K. Peaks in spring/summer storm season, but year-round work. No prior sales experience required — attitude beats resume. Score for hustle, thick skin, comfort outdoors, resilience to rejection.
+
+STRONG POSITIVE (each +15-20pts):
+- Field sales experience (door-to-door, canvassing, outside sales)
+- Insurance / roofing / restoration / construction industry background
+- Commission-only or commission-primary experience
+
+MODERATE POSITIVE (each +8-12pts):
+- Mentions owning a vehicle or having a valid driver's license
+- Chicagoland / DuPage / Cook / Will / Kane County location
+- Hungry, motivated language ("driven", "goal-oriented", "competitive", "grind", "hustle")
+- Any B2C sales experience
+- Language indicating thick skin or resilience ("don't take no for an answer", "love the challenge")
+
+NEUTRAL (0pts):
+- Retail sales only
+- No prior sales experience but shows hustle indicators
+- Recent graduate willing to work hard
+
+NEGATIVE (each -10-20pts):
+- Only remote/desk/call center jobs with no field interest
+- Passive application language ("seeking opportunities", "open to roles") with no energy
+- No mention of vehicle or driving
+- Explicitly requires base salary or fixed compensation
+`.trim();
+
+const BOOKKEEPER_RUBRIC = `
+BOOKKEEPER RUBRIC (score 0-100):
+
+ROLE CONTEXT: Full-time, on-site in Glen Ellyn, IL. $70,000–$75,000/year. Supports a small but fast-growing contractor business — QuickBooks Online, job costing, subcontractor payments, AP/AR. Must be able to work on-site; remote-only is disqualifying.
+
+STRONG POSITIVE (each +15-20pts):
+- QuickBooks Online experience (explicit — QBO specifically, not just "QuickBooks")
+- Contractor / construction / trade business accounting
+- AP/AR experience
+
+MODERATE POSITIVE (each +8-12pts):
+- Small business accounting background
+- Job costing or project billing experience
+- Glen Ellyn / DuPage County / Chicagoland location
+
+NEGATIVE (each -10-20pts):
+- Only large corporate accounting (Fortune 500 / enterprise)
+- Only QuickBooks Desktop — not Online
+- Remote-only preference mentioned
+- Part-time availability only (this is a full-time role)
+- Salary expectation explicitly $90K+ (role pays $70–75K)
+`.trim();
+
+const COMPANY_CONTEXT = `Greater Good Restoration / Frontline Adjusters is a storm damage restoration and public adjusting company in Glen Ellyn, IL (DuPage County, western Chicago suburbs). They do roofing, siding, gutters, and storm damage repair, working with insurance companies on behalf of homeowners.
+
+Sales reps knock doors in DuPage and Cook counties meeting homeowners after storm events. Commission-only — no base salary. Top reps earn $80–150K+/year, average $50–80K. No prior experience required; attitude and hustle matter most.
+
+The bookkeeper role is full-time, on-site in Glen Ellyn at $70,000–$75,000/year. It supports a fast-growing contractor business — QuickBooks Online, job costing, subcontractor payments, AP/AR.
+
+Score based on realistic fit for THESE specific roles. If a candidate applied for one role but clearly fits the other better, flag that in the reasoning field.`;
 
 export async function scoreCandidate(
   resumeText: string,
   positionTitle: string
 ): Promise<{ score: number; reasoning: string }> {
+  const isBookkeeper = /bookkeeper|bookkeeping/i.test(positionTitle);
+  const rubric = isBookkeeper ? BOOKKEEPER_RUBRIC : SALES_REP_RUBRIC;
+  const roleLabel = isBookkeeper ? 'Bookkeeper' : 'Sales Rep';
+
   const msg = await client.messages.create({
     model: 'claude-sonnet-4-6',
     max_tokens: 512,
     messages: [
       {
         role: 'user',
-        content: `Score this candidate's fit for the "${positionTitle}" role at a storm damage restoration company (field sales / restoration). Score 0-100.
+        content: `${COMPANY_CONTEXT}
+
+Score this candidate's fit for the "${roleLabel}" role using the rubric below. Apply each criterion explicitly and tally a final score from 0-100.
+
+${rubric}
 
 Resume/Application:
 ${resumeText}
 
-Respond with JSON only: {"score": <number>, "reasoning": "<2 sentences>"}`,
+Apply the rubric step by step (internally), then respond with JSON only:
+{"score": <number 0-100>, "reasoning": "<2-3 sentences: key scoring factors, and if the candidate appears to be a strong fit for the OTHER role instead, flag that explicitly>"}`,
       },
     ],
   });
@@ -31,7 +114,7 @@ Respond with JSON only: {"score": <number>, "reasoning": "<2 sentences>"}`,
     const parsed = JSON.parse(jsonMatch[0]) as { score: number; reasoning: string };
     return { score: Math.min(100, Math.max(0, parsed.score)), reasoning: parsed.reasoning };
   } catch {
-    return { score: 50, reasoning: 'Could not parse scoring response.' };
+    return { score: 0, reasoning: 'Scoring failed — skipping to avoid false positives' };
   }
 }
 

@@ -9,8 +9,19 @@ import { notify } from '../services/telegram.js';
 
 const webhooks = new Hono();
 
-// Track last processed historyId
-let lastHistoryId = '';
+// historyId is persisted to DB — see getStoredHistoryId / setStoredHistoryId below
+async function getStoredHistoryId(): Promise<string> {
+  const row = await queryOne<{ value: string }>(`SELECT value FROM settings WHERE key = 'gmail_history_id'`, []);
+  return row?.value ? (JSON.parse(row.value) as string) : '';
+}
+
+async function setStoredHistoryId(id: string): Promise<void> {
+  await query(
+    `INSERT INTO settings (key, value, updated_at) VALUES ('gmail_history_id', $1, now())
+     ON CONFLICT (key) DO UPDATE SET value = $1, updated_at = now()`,
+    [JSON.stringify(id)]
+  );
+}
 
 // Gmail Pub/Sub push
 webhooks.post('/gmail', async (c) => {
@@ -28,10 +39,11 @@ async function processGmailPushAsync(req: Request): Promise<void> {
     const decoded = JSON.parse(Buffer.from(dataB64, 'base64').toString('utf8')) as { historyId?: string };
     const historyId = decoded.historyId?.toString() ?? '';
 
-    if (!historyId || historyId === lastHistoryId) return;
+    const storedHistoryId = await getStoredHistoryId();
+    if (!historyId || historyId === storedHistoryId) return;
 
-    const prevHistoryId = lastHistoryId;
-    lastHistoryId = historyId;
+    const prevHistoryId = storedHistoryId;
+    await setStoredHistoryId(historyId);
 
     if (!prevHistoryId) return; // First notification — just store historyId
 
@@ -101,7 +113,7 @@ async function processInboundEmail(msg: GmailMessage): Promise<void> {
   const { score, reasoning } = await scoreCandidate(
     parsed.resumeText,
     position?.title ?? 'Sales Rep'
-  ).catch(() => ({ score: 50, reasoning: '' }));
+  ).catch(() => ({ score: 0, reasoning: 'Scoring failed — skipping to avoid false positives' }));
 
   // Save candidate
   const rows = await query<Candidate>(
@@ -117,8 +129,8 @@ async function processInboundEmail(msg: GmailMessage): Promise<void> {
   // Log inbound email
   await logMessage(candidate.id, 'inbound', 'email', parsed.rawEmail);
 
-  // Score < 30 → decline
-  const threshold = 30;
+  // Threshold: must score ≥50 to proceed to SMS outreach
+  const threshold = 50; // Score < 50 → decline
   if (score < threshold) {
     const declineEmail = buildDeclineEmail(name);
     await sendEmail(email, 'Your Application to Frontline Adjusters', declineEmail).catch(console.error);
@@ -189,7 +201,7 @@ webhooks.post('/gmail/watch', async (c) => {
   }
   try {
     const result = await watchInbox();
-    lastHistoryId = result.historyId;
+    await setStoredHistoryId(result.historyId);
     return c.json({ ok: true, historyId: result.historyId, expiration: result.expiration });
   } catch (err) {
     console.error('watchInbox error:', err);

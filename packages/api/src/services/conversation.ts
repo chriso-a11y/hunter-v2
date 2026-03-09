@@ -106,12 +106,34 @@ async function handleSMSSent(
       `No worries at all, ${candidate.name.split(' ')[0]}! Thanks for the response. Best of luck with your search! 🙂 — Hunter`
     );
   } else {
-    // Ambiguous — re-prompt
-    await outbound(
-      candidate.id,
-      candidate.phone!,
-      `Hey! Just checking — did you want to continue with a few quick questions? Reply YES or NO 😊`
-    );
+    // Ambiguous — check prompt_count loop guard
+    let notesObj: { prompt_count?: number; [key: string]: unknown } = {};
+    try {
+      if (candidate.notes) notesObj = JSON.parse(candidate.notes) as typeof notesObj;
+    } catch {
+      notesObj = {};
+    }
+
+    const promptCount = (notesObj.prompt_count ?? 0) + 1;
+    notesObj.prompt_count = promptCount;
+    await updateCandidate(candidate.id, { notes: JSON.stringify(notesObj) });
+
+    if (promptCount >= 2) {
+      // Too many ambiguous replies — gracefully exit
+      await updateCandidate(candidate.id, { state: 'declined' });
+      await outbound(
+        candidate.id,
+        candidate.phone!,
+        `No worries! If you'd like to learn more about the role, feel free to visit frontlineadjusters.com or reach out anytime. Best of luck! — Hunter`
+      );
+    } else {
+      // First ambiguous reply — re-prompt once
+      await outbound(
+        candidate.id,
+        candidate.phone!,
+        `Hey! Just checking — did you want to continue with a few quick questions? Reply YES or NO 😊`
+      );
+    }
   }
 }
 
