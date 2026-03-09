@@ -81,60 +81,22 @@ async function handleSMSSent(
 ): Promise<void> {
   const { intent } = await detectIntent(body);
 
-  if (intent === 'yes') {
-    // Start screening
-    await updateCandidate(candidate.id, { state: 'screening' });
-    const questions: KnockoutQuestion[] = position?.knockout_questions ?? [];
-
-    if (questions.length === 0) {
-      // No knockout questions — move directly to qualified
-      await moveToQualified(candidate, position);
-      return;
-    }
-
-    const firstQuestion = questions[0];
-    await outbound(
-      candidate.id,
-      candidate.phone!,
-      `Awesome, let's do it! Quick question — ${firstQuestion.question}`
-    );
-  } else if (intent === 'no') {
+  // Only decline on an explicit "no" — anything else counts as engagement.
+  // The initial SMS already asked question 0, so their reply IS the answer to it.
+  if (intent === 'no') {
     await updateCandidate(candidate.id, { state: 'declined' });
     await outbound(
       candidate.id,
       candidate.phone!,
-      `No worries at all, ${candidate.name.split(' ')[0]}! Thanks for the response. Best of luck with your search! 🙂 — Hunter`
+      `No worries at all, ${candidate.name.split(' ')[0]}! Best of luck with your search! — Hunter`
     );
-  } else {
-    // Ambiguous — check prompt_count loop guard
-    let notesObj: { prompt_count?: number; [key: string]: unknown } = {};
-    try {
-      if (candidate.notes) notesObj = JSON.parse(candidate.notes) as typeof notesObj;
-    } catch {
-      notesObj = {};
-    }
-
-    const promptCount = (notesObj.prompt_count ?? 0) + 1;
-    notesObj.prompt_count = promptCount;
-    await updateCandidate(candidate.id, { notes: JSON.stringify(notesObj) });
-
-    if (promptCount >= 2) {
-      // Too many ambiguous replies — gracefully exit
-      await updateCandidate(candidate.id, { state: 'declined' });
-      await outbound(
-        candidate.id,
-        candidate.phone!,
-        `No worries! If you'd like to learn more about the role, feel free to visit frontlineadjusters.com or reach out anytime. Best of luck! — Hunter`
-      );
-    } else {
-      // First ambiguous reply — re-prompt once
-      await outbound(
-        candidate.id,
-        candidate.phone!,
-        `Hey! Just checking — did you want to continue with a few quick questions? Reply YES or NO 😊`
-      );
-    }
+    return;
   }
+
+  // Any other response (yes, unsure, question, other) = they engaged.
+  // Transition to screening and treat this reply as the answer to question 0.
+  await updateCandidate(candidate.id, { state: 'screening' });
+  await handleScreening({ ...candidate, state: 'screening' }, body, position);
 }
 
 async function handleScreening(

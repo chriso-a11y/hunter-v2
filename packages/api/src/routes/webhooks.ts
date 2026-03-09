@@ -3,7 +3,7 @@ import { query, queryOne } from '../db/client.js';
 import { Candidate, Position } from '../db/types.js';
 import { getNewMessages, parseCandidate, sendEmail, watchInbox, GmailMessage } from '../services/gmail.js';
 import { sendSMS, logMessage, isOptOut, normalizePhone, getCandidateByPhone } from '../services/sms.js';
-import { scoreCandidate, extractContactInfo } from '../services/ai.js';
+import { scoreCandidate, extractContactInfo, generateInitialSMS } from '../services/ai.js';
 import { handleInboundSMS } from '../services/conversation.js';
 import { notify } from '../services/telegram.js';
 
@@ -142,10 +142,17 @@ async function processInboundEmail(msg: GmailMessage): Promise<void> {
 
   // Score >= 30
   if (phone) {
-    // Send initial SMS
-    const firstName = name.split(' ')[0];
     const posTitle = position?.title ?? 'Sales Rep';
-    const smsBody = `Hey ${firstName}! 👋 This is Hunter with Frontline Adjusters — saw your application for ${posTitle}. Super excited to connect! Mind if I ask you a couple quick questions to see if it's a good fit?\n\nReply YES to continue or STOP to opt out.`;
+    const questions: Array<{ question: string }> = (position?.knockout_questions ?? []) as Array<{ question: string }>;
+    const firstQuestion = questions[0]?.question;
+
+    // Generate personalized opener — references something real from their resume,
+    // flows directly into the first knockout question (no YES/NO gate)
+    const smsBody = await generateInitialSMS(name, posTitle, parsed.resumeText, firstQuestion).catch(() => {
+      const firstName = name.split(' ')[0];
+      const fallbackQ = firstQuestion ? ` Quick question — ${firstQuestion}` : '';
+      return `Hey ${firstName}! Hunter here from Frontline Adjusters — saw your application for ${posTitle}.${fallbackQ}`;
+    });
 
     await sendSMS(phone, smsBody).catch(console.error);
     await logMessage(candidate.id, 'outbound', 'sms', smsBody);

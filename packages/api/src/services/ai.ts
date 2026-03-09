@@ -223,6 +223,54 @@ export async function generateCandidateSummary(
   return msg.content[0].type === 'text' ? msg.content[0].text.trim() : '';
 }
 
+export async function generateInitialSMS(
+  name: string,
+  positionTitle: string,
+  resumeText: string,
+  firstKnockoutQuestion?: string
+): Promise<string> {
+  const firstName = name.split(' ')[0];
+
+  const questionInstruction = firstKnockoutQuestion
+    ? `End the message by asking this knockout question conversationally (not as a checkbox): "${firstKnockoutQuestion}"`
+    : `End with a warm, open-ended invitation to chat — something like "Would love to connect if you're still interested!" or similar.`;
+
+  const msg = await client.messages.create({
+    model: 'claude-sonnet-4-6',
+    max_tokens: 200,
+    system: HUNTER_SYSTEM,
+    messages: [
+      {
+        role: 'user',
+        content: `Write a personalized initial SMS from Hunter to ${firstName}, who applied for the ${positionTitle} role at Greater Good Restoration / Frontline Adjusters.
+
+Rules:
+- 2-3 sentences total — keep it tight
+- Reference something SPECIFIC from their application or resume: a real previous employer, a skill, their city, a credential — something that proves you actually read it. Do NOT make things up — only reference what's there.
+- Do NOT include a "Reply YES to continue" gate or any opt-in prompt — skip it entirely
+- Do NOT say "Super excited" or use corporate filler
+- ${questionInstruction}
+- Write like a real human texting from their phone, not a corporate template
+- Sign as Hunter
+
+Resume/Application:
+${resumeText.slice(0, 2000)}
+
+Target style: "Hey Marcus! Hunter here from Frontline Adjusters — noticed you've got door-to-door experience at Vivint, that's exactly the kind of hustle we're looking for. Do you have a valid driver's license?"
+
+Write the SMS now (just the message text, nothing else):`,
+      },
+    ],
+  });
+
+  const text = msg.content[0].type === 'text' ? msg.content[0].text.trim() : '';
+  if (text) return text;
+
+  // Fallback: generic but still skips the gate
+  const fallbackQ = firstKnockoutQuestion ? ` Quick question — ${firstKnockoutQuestion}` : '';
+  return `Hey ${firstName}! Hunter here from Frontline Adjusters — saw your application for the ${positionTitle} role.${fallbackQ}`;
+}
+
 export async function generateUnsureResponse(question: string): Promise<string> {
   const msg = await client.messages.create({
     model: 'claude-sonnet-4-6',
