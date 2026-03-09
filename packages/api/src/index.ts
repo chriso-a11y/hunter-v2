@@ -8,6 +8,7 @@ import webhooks from './routes/webhooks.js';
 import candidatesRouter from './routes/candidates.js';
 import positionsRouter from './routes/positions.js';
 import settingsRouter from './routes/settings.js';
+import telegramRouter from './routes/telegram.js';
 
 const app = new Hono();
 
@@ -25,6 +26,9 @@ app.get('/health', (c) => c.json({ ok: true, timestamp: new Date().toISOString()
 
 // Webhooks (no auth — validated by Twilio signature / Gmail pub/sub)
 app.route('/api/webhook', webhooks);
+
+// Telegram callback (no auth — Telegram pushes here) + cron flush
+app.route('/api/telegram', telegramRouter);
 
 // Protected API routes
 app.use('/api/*', authMiddleware);

@@ -2,10 +2,11 @@ import { Hono } from 'hono';
 import { query, queryOne } from '../db/client.js';
 import { Candidate, Position } from '../db/types.js';
 import { getNewMessages, parseCandidate, sendEmail, watchInbox, GmailMessage } from '../services/gmail.js';
-import { sendSMS, logMessage, isOptOut, normalizePhone, getCandidateByPhone } from '../services/sms.js';
+import { logMessage, isOptOut, normalizePhone, getCandidateByPhone } from '../services/sms.js';
 import { scoreCandidate, extractContactInfo, generateInitialSMS } from '../services/ai.js';
 import { handleInboundSMS } from '../services/conversation.js';
 import { notify } from '../services/telegram.js';
+import { queueForApproval } from '../services/approval.js';
 
 const webhooks = new Hono();
 
@@ -154,10 +155,10 @@ async function processInboundEmail(msg: GmailMessage): Promise<void> {
       return `Hey ${firstName}! Hunter here from Frontline Adjusters — saw your application for ${posTitle}.${fallbackQ}`;
     });
 
-    await sendSMS(phone, smsBody).catch(console.error);
-    await logMessage(candidate.id, 'outbound', 'sms', smsBody);
+    // Route through approval queue — Chris approves before it fires
+    await queueForApproval(candidate.id, name, phone, posTitle, '', smsBody).catch(console.error);
     await query(`UPDATE candidates SET state = 'sms_sent', updated_at = now() WHERE id = $1`, [candidate.id]);
-    await notify(`📨 New candidate: *${name}* (${posTitle}, score: ${score}/100) — SMS sent`);
+    await notify(`📨 New candidate: *${name}* (${posTitle}, score: ${score}/100) — pending approval`);
   } else {
     // No phone — ask for it via email
     const askPhone = buildAskPhoneEmail(name, position?.title ?? 'Sales Rep');

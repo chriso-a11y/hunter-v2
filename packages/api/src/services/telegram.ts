@@ -45,3 +45,65 @@ export async function notifyWithCandidate(
 
   await notify(text);
 }
+
+export interface InlineButton {
+  text: string;
+  callback_data: string;
+}
+
+/**
+ * Sends a message with an inline keyboard.
+ * Returns the Telegram message_id, or null on failure.
+ */
+export async function sendWithInlineKeyboard(
+  text: string,
+  buttons: InlineButton[][]
+): Promise<number | null> {
+  const b = getBot();
+  if (!b || !CHAT_ID) {
+    console.log('[Telegram sendWithInlineKeyboard]', text);
+    return null;
+  }
+  try {
+    const msg = await b.sendMessage(CHAT_ID, text, {
+      parse_mode: 'Markdown',
+      reply_markup: {
+        inline_keyboard: buttons,
+      },
+    });
+    return msg.message_id;
+  } catch (err) {
+    console.error('Telegram sendWithInlineKeyboard error:', err);
+    return null;
+  }
+}
+
+/**
+ * Answers a Telegram callback query (dismisses the loading spinner).
+ */
+export async function answerCallbackQuery(callbackQueryId: string, text: string): Promise<void> {
+  const b = getBot();
+  if (!b) return;
+  try {
+    await b.answerCallbackQuery(callbackQueryId, { text });
+  } catch (err) {
+    console.error('Telegram answerCallbackQuery error:', err);
+  }
+}
+
+/**
+ * Edits the text of an existing Telegram message.
+ */
+export async function editMessage(messageId: number, newText: string): Promise<void> {
+  const b = getBot();
+  if (!b || !CHAT_ID) return;
+  try {
+    await b.editMessageText(newText, {
+      chat_id: CHAT_ID,
+      message_id: messageId,
+      parse_mode: 'Markdown',
+    });
+  } catch (err) {
+    console.error('Telegram editMessage error:', err);
+  }
+}

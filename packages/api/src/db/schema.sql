@@ -52,12 +52,39 @@ CREATE TABLE IF NOT EXISTS settings (
   updated_at TIMESTAMPTZ DEFAULT now()
 );
 
+CREATE TABLE IF NOT EXISTS pending_messages (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  candidate_id UUID REFERENCES candidates(id),
+  candidate_phone TEXT NOT NULL,
+  message TEXT NOT NULL,
+  state TEXT NOT NULL DEFAULT 'pending', -- pending | approved | editing | edited | skipped | auto_sent
+  telegram_message_id INTEGER,
+  edited_message TEXT,
+  position_title TEXT,
+  conversation_context TEXT,
+  created_at TIMESTAMPTZ DEFAULT now(),
+  expires_at TIMESTAMPTZ DEFAULT now() + INTERVAL '4 hours',
+  sent_at TIMESTAMPTZ
+);
+
+CREATE TABLE IF NOT EXISTS feedback_log (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  candidate_id UUID REFERENCES candidates(id),
+  position_title TEXT,
+  conversation_context TEXT,
+  hunter_draft TEXT NOT NULL,
+  chris_edit TEXT NOT NULL,
+  created_at TIMESTAMPTZ DEFAULT now()
+);
+
 -- Indexes
 CREATE INDEX IF NOT EXISTS idx_candidates_state ON candidates(state);
 CREATE INDEX IF NOT EXISTS idx_candidates_phone ON candidates(phone);
 CREATE INDEX IF NOT EXISTS idx_candidates_email ON candidates(email);
 CREATE INDEX IF NOT EXISTS idx_messages_candidate_id ON messages(candidate_id);
 CREATE INDEX IF NOT EXISTS idx_candidates_deleted_at ON candidates(deleted_at);
+CREATE INDEX IF NOT EXISTS idx_pending_messages_state ON pending_messages(state);
+CREATE INDEX IF NOT EXISTS idx_pending_messages_expires_at ON pending_messages(expires_at);
 
 -- Seed positions
 INSERT INTO positions (title, department, description, knockout_questions)

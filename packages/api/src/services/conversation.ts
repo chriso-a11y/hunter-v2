@@ -1,6 +1,7 @@
 import { query, queryOne } from '../db/client.js';
 import { Candidate, KnockoutQuestion, Position, CalendarSlot } from '../db/types.js';
-import { sendSMS, logMessage } from './sms.js';
+import { logMessage } from './sms.js';
+import { queueForApproval } from './approval.js';
 import { detectIntent, generateKnockoutReply, generateUnsureResponse, generateCandidateSummary } from './ai.js';
 import { getAvailableSlots, bookSlot } from './calendar.js';
 import { notify, notifyWithCandidate } from './telegram.js';
@@ -31,9 +32,28 @@ async function getPosition(positionId: string): Promise<Position | null> {
   return queryOne<Position>(`SELECT * FROM positions WHERE id = $1`, [positionId]);
 }
 
-async function outbound(candidateId: string, phone: string, message: string): Promise<void> {
-  await sendSMS(phone, message);
-  await logMessage(candidateId, 'outbound', 'sms', message);
+/**
+ * Queues a draft outbound SMS for Telegram approval before it is sent.
+ * Builds conversation context from the last 3 logged messages.
+ */
+async function outbound(
+  candidateId: string,
+  phone: string,
+  message: string,
+  candidate: Candidate,
+  positionTitle: string
+): Promise<void> {
+  const recentMessages = await query<{ direction: string; body: string; created_at: Date }>(
+    `SELECT direction, body, created_at FROM messages WHERE candidate_id = $1 ORDER BY created_at DESC LIMIT 3`,
+    [candidateId]
+  );
+  const context = recentMessages
+    .reverse()
+    .map((m) => `${m.direction === 'inbound' ? '👤' : '🤖'} ${m.body}`)
+    .join('\n');
+
+  await queueForApproval(candidateId, candidate.name, phone, positionTitle, context, message);
+  // SMS is dispatched by the approval handler (approve action or auto-send cron) — not here.
 }
 
 export async function handleInboundSMS(from: string, body: string, candidate: Candidate): Promise<void> {
@@ -44,6 +64,8 @@ export async function handleInboundSMS(from: string, body: string, candidate: Ca
   const position = candidate.position_id
     ? await getPosition(candidate.position_id)
     : null;
+
+  const posTitle = position?.title ?? 'Unknown';
 
   // Route by state
   switch (candidate.state) {
@@ -64,7 +86,9 @@ export async function handleInboundSMS(from: string, body: string, candidate: Ca
       await outbound(
         candidate.id,
         candidate.phone!,
-        `Thanks ${candidate.name.split(' ')[0]}! We'll see you then. Feel free to reach out if you have any questions before the call 😊 — Hunter`
+        `Thanks ${candidate.name.split(' ')[0]}! We'll see you then. Feel free to reach out if you have any questions before the call 😊 — Hunter`,
+        candidate,
+        posTitle
       );
       break;
 
@@ -79,6 +103,7 @@ async function handleSMSSent(
   body: string,
   position: Position | null
 ): Promise<void> {
+  const posTitle = position?.title ?? 'Unknown';
   const { intent } = await detectIntent(body);
 
   // Only decline on an explicit "no" — anything else counts as engagement.
@@ -88,7 +113,9 @@ async function handleSMSSent(
     await outbound(
       candidate.id,
       candidate.phone!,
-      `No worries at all, ${candidate.name.split(' ')[0]}! Best of luck with your search! — Hunter`
+      `No worries at all, ${candidate.name.split(' ')[0]}! Best of luck with your search! — Hunter`,
+      candidate,
+      posTitle
     );
     return;
   }
@@ -104,6 +131,7 @@ async function handleScreening(
   body: string,
   position: Position | null
 ): Promise<void> {
+  const posTitle = position?.title ?? 'Unknown';
   const questions: KnockoutQuestion[] = position?.knockout_questions ?? [];
   const responses = candidate.knockout_responses as Record<string, string>;
 
@@ -123,7 +151,7 @@ async function handleScreening(
   // Handle unsure
   if (intent === 'unsure' || intent === 'other') {
     const clarify = await generateUnsureResponse(currentQuestion.question);
-    await outbound(candidate.id, candidate.phone!, clarify);
+    await outbound(candidate.id, candidate.phone!, clarify, candidate, posTitle);
     return;
   }
 
@@ -139,7 +167,7 @@ async function handleScreening(
   if (isDisqualified) {
     const declineMsg = await generateKnockoutReply(currentQuestion.question, body, false, false);
     await updateCandidate(candidate.id, { state: 'declined', knockout_pass: false });
-    await outbound(candidate.id, candidate.phone!, declineMsg);
+    await outbound(candidate.id, candidate.phone!, declineMsg, candidate, posTitle);
     return;
   }
 
@@ -152,14 +180,14 @@ async function handleScreening(
   if (isLast) {
     // All questions passed
     await updateCandidate(candidate.id, { knockout_pass: true });
-    await outbound(candidate.id, candidate.phone!, transition);
+    await outbound(candidate.id, candidate.phone!, transition, candidate, posTitle);
     // Move to qualified and send slots
     await moveToQualified(candidate, position);
   } else {
     // Ask next question
     const nextQuestion = questions[nextIndex];
     const message = `${transition} ${nextQuestion.question}`;
-    await outbound(candidate.id, candidate.phone!, message);
+    await outbound(candidate.id, candidate.phone!, message, candidate, posTitle);
   }
 }
 
@@ -174,6 +202,7 @@ async function sendSchedulingOptions(
   candidate: Candidate,
   position: Position | null
 ): Promise<void> {
+  const posTitle = position?.title ?? 'Unknown';
   let slots: CalendarSlot[] = [];
   try {
     slots = await getAvailableSlots(5, 3);
@@ -183,7 +212,9 @@ async function sendSchedulingOptions(
     await outbound(
       candidate.id,
       candidate.phone!,
-      `Amazing — you sound like a great fit! Our hiring manager Chris will be reaching out to schedule a quick call very soon. We'll be in touch! 🙌 — Hunter`
+      `Amazing — you sound like a great fit! Our hiring manager Chris will be reaching out to schedule a quick call very soon. We'll be in touch! 🙌 — Hunter`,
+      candidate,
+      posTitle
     );
     return;
   }
@@ -192,7 +223,9 @@ async function sendSchedulingOptions(
     await outbound(
       candidate.id,
       candidate.phone!,
-      `Amazing — you sound like a great fit! Chris will reach out shortly to schedule a quick call. Stay tuned! 🙌 — Hunter`
+      `Amazing — you sound like a great fit! Chris will reach out shortly to schedule a quick call. Stay tuned! 🙌 — Hunter`,
+      candidate,
+      posTitle
     );
     return;
   }
@@ -215,7 +248,7 @@ async function sendSchedulingOptions(
     notes: JSON.stringify({ pending_slots: slotData, prev_notes: candidate.notes }),
   });
 
-  await outbound(candidate.id, candidate.phone!, message);
+  await outbound(candidate.id, candidate.phone!, message, candidate, posTitle);
 }
 
 async function handleQualified(
@@ -223,6 +256,7 @@ async function handleQualified(
   body: string,
   position: Position | null
 ): Promise<void> {
+  const posTitle = position?.title ?? 'Unknown';
   // Try to parse slot selection
   const trimmed = body.trim();
   const slotMatch = trimmed.match(/^[123]$/);
@@ -252,12 +286,30 @@ async function handleQualified(
         const slotLines = newSlots.map((s, i) => `${numberEmojis[i]} ${s.label}`).join('\n');
         const slotData = newSlots.map((s) => ({ start: s.start.toISOString(), end: s.end.toISOString(), label: s.label }));
         await updateCandidate(candidate.id, { notes: JSON.stringify({ pending_slots: slotData, prev_notes: notesObj.prev_notes }) });
-        await outbound(candidate.id, candidate.phone!, `No problem! Here are a few more options:\n\n${slotLines}\n\nJust reply 1, 2, or 3!`);
+        await outbound(
+          candidate.id,
+          candidate.phone!,
+          `No problem! Here are a few more options:\n\n${slotLines}\n\nJust reply 1, 2, or 3!`,
+          candidate,
+          posTitle
+        );
       } else {
-        await outbound(candidate.id, candidate.phone!, `Got it! Chris will reach out directly to find a time that works for you. Looking forward to connecting! — Hunter`);
+        await outbound(
+          candidate.id,
+          candidate.phone!,
+          `Got it! Chris will reach out directly to find a time that works for you. Looking forward to connecting! — Hunter`,
+          candidate,
+          posTitle
+        );
       }
     } else {
-      await outbound(candidate.id, candidate.phone!, `Hey! Just reply with 1, 2, or 3 to pick a time for your call with Chris 😊`);
+      await outbound(
+        candidate.id,
+        candidate.phone!,
+        `Hey! Just reply with 1, 2, or 3 to pick a time for your call with Chris 😊`,
+        candidate,
+        posTitle
+      );
     }
     return;
   }
@@ -266,7 +318,13 @@ async function handleQualified(
   const chosenSlot = pendingSlots[slotIndex];
 
   if (!chosenSlot) {
-    await outbound(candidate.id, candidate.phone!, `Please reply with 1, 2, or 3 to pick your preferred time!`);
+    await outbound(
+      candidate.id,
+      candidate.phone!,
+      `Please reply with 1, 2, or 3 to pick your preferred time!`,
+      candidate,
+      posTitle
+    );
     return;
   }
 
@@ -294,7 +352,9 @@ async function handleQualified(
   await outbound(
     candidate.id,
     candidate.phone!,
-    `You're all set! 🎉 Your call with Chris is confirmed for ${slot.label} CST. We'll send a reminder before. Looking forward to chatting! — Hunter`
+    `You're all set! 🎉 Your call with Chris is confirmed for ${slot.label} CST. We'll send a reminder before. Looking forward to chatting! — Hunter`,
+    candidate,
+    posTitle
   );
 
   // Notify Chris via Telegram

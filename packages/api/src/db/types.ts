@@ -58,6 +58,33 @@ export interface Message {
   created_at: string;
 }
 
+export type PendingMessageState = 'pending' | 'approved' | 'editing' | 'edited' | 'skipped' | 'auto_sent';
+
+export interface PendingMessage {
+  id: string;
+  candidate_id: string;
+  candidate_phone: string;
+  message: string;
+  state: PendingMessageState;
+  telegram_message_id: number | null;
+  edited_message: string | null;
+  position_title: string | null;
+  conversation_context: string | null;
+  created_at: string;
+  expires_at: string;
+  sent_at: string | null;
+}
+
+export interface FeedbackLog {
+  id: string;
+  candidate_id: string;
+  position_title: string | null;
+  conversation_context: string | null;
+  hunter_draft: string;
+  chris_edit: string;
+  created_at: string;
+}
+
 export interface CalendarSlot {
   start: Date;
   end: Date;

@@ -1,4 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
+import { query } from '../db/client.js';
+import { FeedbackLog } from '../db/types.js';
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
@@ -78,6 +80,34 @@ The bookkeeper role is full-time, on-site in Glen Ellyn at $70,000–$75,000/yea
 
 Score based on realistic fit for THESE specific roles. If a candidate applied for one role but clearly fits the other better, flag that in the reasoning field.`;
 
+/**
+ * Pulls the 10 most recent feedback_log rows and formats them as few-shot
+ * examples showing how Chris improved Hunter's drafts. Returns an empty
+ * string if there are no rows yet (cold start).
+ */
+export async function getFeedbackExamples(): Promise<string> {
+  try {
+    const rows = await query<FeedbackLog>(
+      `SELECT position_title, conversation_context, hunter_draft, chris_edit
+       FROM feedback_log
+       ORDER BY created_at DESC
+       LIMIT 10`
+    );
+    if (rows.length === 0) return '';
+
+    const examples = rows
+      .map((r, i) => {
+        const ctx = r.conversation_context ? `\nContext:\n${r.conversation_context}` : '';
+        return `Example ${i + 1} (${r.position_title ?? 'Unknown role'}):${ctx}\nHunter draft: "${r.hunter_draft}"\nChris sent instead: "${r.chris_edit}"`;
+      })
+      .join('\n\n');
+
+    return `\n\n---\nLEARNED FROM CHRIS'S EDITS (use these to calibrate your tone and style — prefer Chris's phrasing patterns over Hunter's drafts):\n${examples}\n---`;
+  } catch {
+    return '';
+  }
+}
+
 export async function scoreCandidate(
   resumeText: string,
   positionTitle: string
@@ -151,10 +181,11 @@ export async function generateKnockoutReply(
   isLast: boolean,
   pass: boolean
 ): Promise<string> {
+  const feedbackExamples = await getFeedbackExamples();
   const msg = await client.messages.create({
     model: 'claude-sonnet-4-6',
     max_tokens: 200,
-    system: HUNTER_SYSTEM,
+    system: HUNTER_SYSTEM + feedbackExamples,
     messages: [
       {
         role: 'user',
@@ -235,10 +266,12 @@ export async function generateInitialSMS(
     ? `End the message by asking this knockout question conversationally (not as a checkbox): "${firstKnockoutQuestion}"`
     : `End with a warm, open-ended invitation to chat — something like "Would love to connect if you're still interested!" or similar.`;
 
+  const feedbackExamples = await getFeedbackExamples();
+
   const msg = await client.messages.create({
     model: 'claude-sonnet-4-6',
     max_tokens: 200,
-    system: HUNTER_SYSTEM,
+    system: HUNTER_SYSTEM + feedbackExamples,
     messages: [
       {
         role: 'user',
