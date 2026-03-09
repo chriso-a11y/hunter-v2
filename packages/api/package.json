@@ -6,7 +6,8 @@
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "postinstall": "playwright install chromium --with-deps || true"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.30.0",
@@ -19,7 +20,8 @@
     "pg": "^8.13.1",
     "twilio": "^5.3.7",
     "dotenv": "^16.4.7",
-    "fast-xml-parser": "^4.5.0"
+    "fast-xml-parser": "^4.5.0",
+    "playwright": "^1.40.0"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

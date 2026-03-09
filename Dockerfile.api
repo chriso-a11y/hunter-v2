@@ -1,9 +1,26 @@
 FROM node:20-alpine
+
+# Install Chromium and its dependencies for Playwright
+RUN apk add --no-cache \
+    chromium \
+    nss \
+    freetype \
+    harfbuzz \
+    ca-certificates \
+    ttf-freefont
+
+# Tell Playwright to use the system Chromium instead of downloading its own
+ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
+ENV PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium-browser
+
 WORKDIR /app
 RUN npm install -g pnpm
+
 COPY pnpm-lock.yaml package.json pnpm-workspace.yaml ./
 COPY packages/api/package.json ./packages/api/
 RUN pnpm install --frozen-lockfile
+
 COPY packages/api ./packages/api
 RUN pnpm --filter api build
+
 CMD ["node", "packages/api/dist/index.js"]

@@ -8,6 +8,7 @@ import { scoreCandidate, extractContactInfo, generateInitialSMS } from '../servi
 import { handleInboundSMS } from '../services/conversation.js';
 import { notify } from '../services/telegram.js';
 import { queueForApproval } from '../services/approval.js';
+import { fetchIndeedResume, extractApplicationUrl } from '../services/indeed.js';
 
 const webhooks = new Hono();
 
@@ -86,9 +87,23 @@ async function processInboundEmail(msg: GmailMessage): Promise<void> {
     return;
   }
 
+  // Try to fetch resume from Indeed if this is an Indeed notification email
+  let indeedResumeText = '';
+  if (parsed.rawEmail.includes('indeed.com') || parsed.rawEmail.toLowerCase().includes('indeed')) {
+    const appUrl = extractApplicationUrl(parsed.rawEmail);
+    if (appUrl) {
+      console.log(`[Indeed] Found application URL: ${appUrl}`);
+      indeedResumeText = await fetchIndeedResume(appUrl).catch(() => '');
+      if (indeedResumeText.length > 100) {
+        console.log(`[Indeed] Resume fetched: ${indeedResumeText.length} chars`);
+        parsed.resumeText = indeedResumeText;
+      }
+    }
+  }
+
   // Determine whether a real resume was included
   const hasAttachmentText = msg.attachments.some((a) => a.text && a.text.length > 50);
-  const hasResume = parsed.resumeText.length >= 100 || hasAttachmentText;
+  const hasResume = (parsed.resumeText.length >= 100) || indeedResumeText.length >= 100 || hasAttachmentText;
 
   // Check for existing candidate by email
   const existing = await queryOne<Candidate>(
