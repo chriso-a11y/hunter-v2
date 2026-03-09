@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import { XMLParser } from 'fast-xml-parser';
 import { query, queryOne } from '../db/client.js';
 import { Candidate, Position } from '../db/types.js';
 import { getNewMessages, parseCandidate, sendEmail, watchInbox, GmailMessage } from '../services/gmail.js';
@@ -85,6 +86,10 @@ async function processInboundEmail(msg: GmailMessage): Promise<void> {
     return;
   }
 
+  // Determine whether a real resume was included
+  const hasAttachmentText = msg.attachments.some((a) => a.text && a.text.length > 50);
+  const hasResume = parsed.resumeText.length >= 100 || hasAttachmentText;
+
   // Check for existing candidate by email
   const existing = await queryOne<Candidate>(
     `SELECT * FROM candidates WHERE email = $1 AND deleted_at IS NULL LIMIT 1`,
@@ -149,7 +154,7 @@ async function processInboundEmail(msg: GmailMessage): Promise<void> {
 
     // Generate personalized opener — references something real from their resume,
     // flows directly into the first knockout question (no YES/NO gate)
-    const smsBody = await generateInitialSMS(name, posTitle, parsed.resumeText, firstQuestion).catch(() => {
+    const smsBody = await generateInitialSMS(name, posTitle, parsed.resumeText, firstQuestion, hasResume).catch(() => {
       const firstName = name.split(' ')[0];
       const fallbackQ = firstQuestion ? ` Quick question — ${firstQuestion}` : '';
       return `Hey ${firstName}! Hunter here from Frontline Adjusters — saw your application for ${posTitle}.${fallbackQ}`;
@@ -266,6 +271,179 @@ async function processTwilioWebhook(formData: FormData | null): Promise<void> {
   if (candidate.opted_out || candidate.state === 'opted_out') return;
 
   await handleInboundSMS(normalizedFrom, body, candidate);
+}
+
+// Indeed ATS webhook — handles both XML (Indeed Apply standard) and JSON formats
+webhooks.post('/indeed', async (c) => {
+  void processIndeedWebhookAsync(c.req.raw.clone());
+  return c.json({ ok: true });
+});
+
+interface IndeedApplicantData {
+  name: string;
+  email: string;
+  phone: string | null;
+  resumeText: string;
+  positionTitle: string;
+}
+
+async function parseIndeedPayload(req: Request): Promise<IndeedApplicantData | null> {
+  const rawText = await req.text();
+  if (!rawText) return null;
+
+  const contentType = req.headers.get('content-type') ?? '';
+
+  // Try JSON first (Format B)
+  if (contentType.includes('application/json') || rawText.trimStart().startsWith('{')) {
+    try {
+      const data = JSON.parse(rawText) as {
+        applicant?: {
+          fullName?: string;
+          email?: string;
+          phoneNumber?: string;
+          resume?: { file?: string; text?: string };
+        };
+        job?: { title?: string };
+      };
+      const applicant = data?.applicant;
+      if (!applicant?.email) return null;
+
+      let resumeText = '';
+      if (applicant.resume?.text) {
+        resumeText = applicant.resume.text;
+      } else if (applicant.resume?.file) {
+        // Attempt plain-text decode of base64 file; works for text resumes
+        try {
+          resumeText = Buffer.from(applicant.resume.file, 'base64').toString('utf8');
+        } catch {
+          resumeText = '';
+        }
+      }
+
+      return {
+        name: applicant.fullName ?? 'Unknown',
+        email: applicant.email,
+        phone: applicant.phoneNumber ? (normalizePhone(applicant.phoneNumber) ?? null) : null,
+        resumeText,
+        positionTitle: data?.job?.title ?? 'Sales Rep',
+      };
+    } catch {
+      // Fall through to XML parsing
+    }
+  }
+
+  // Fallback: XML (Format A — Indeed Apply standard)
+  try {
+    const parser = new XMLParser({ ignoreAttributes: false, processEntities: true });
+    const parsed = parser.parse(rawText) as Record<string, unknown>;
+    const callback = (parsed?.['indeed-apply-callback'] ?? {}) as Record<string, unknown>;
+    const applicant = (callback?.applicant ?? {}) as Record<string, unknown>;
+    const job = (callback?.job ?? {}) as Record<string, unknown>;
+
+    const email = String(applicant?.email ?? '').trim();
+    if (!email) return null;
+
+    const rawPhone = String(applicant?.phone ?? '').trim();
+    const resumeText = String(applicant?.resume ?? '').trim();
+
+    return {
+      name: String(applicant?.fullname ?? 'Unknown').trim(),
+      email,
+      phone: rawPhone ? (normalizePhone(rawPhone) ?? null) : null,
+      resumeText,
+      positionTitle: String(job?.title ?? 'Sales Rep').trim(),
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function processIndeedWebhookAsync(req: Request): Promise<void> {
+  try {
+    const data = await parseIndeedPayload(req);
+    if (!data || !data.email) {
+      console.log('Indeed webhook: could not parse applicant data');
+      return;
+    }
+
+    const { name, email, phone, resumeText, positionTitle } = data;
+
+    // Deduplicate by email
+    const existing = await queryOne<Candidate>(
+      `SELECT * FROM candidates WHERE email = $1 AND deleted_at IS NULL LIMIT 1`,
+      [email]
+    );
+    if (existing) {
+      console.log(`Indeed: duplicate application from ${email}, skipping`);
+      return;
+    }
+
+    // Match position
+    let position: Position | null = null;
+    if (positionTitle) {
+      position = await queryOne<Position>(
+        `SELECT * FROM positions WHERE title ILIKE $1 AND status = 'active' LIMIT 1`,
+        [positionTitle]
+      );
+    }
+    if (!position) {
+      position = await queryOne<Position>(
+        `SELECT * FROM positions WHERE status = 'active' ORDER BY created_at ASC LIMIT 1`,
+        []
+      );
+    }
+
+    // Score candidate
+    const { score, reasoning } = await scoreCandidate(
+      resumeText,
+      position?.title ?? 'Sales Rep'
+    ).catch(() => ({ score: 0, reasoning: 'Scoring failed — skipping to avoid false positives' }));
+
+    // Save candidate
+    const rawSource = `Indeed Application\nName: ${name}\nEmail: ${email}\nPhone: ${phone ?? 'N/A'}\n\n${resumeText}`;
+    const rows = await query<Candidate>(
+      `INSERT INTO candidates (position_id, name, email, phone, resume_text, raw_email, fit_score, state, source)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'new', 'indeed')
+       RETURNING *`,
+      [position?.id ?? null, name, email, phone, resumeText, rawSource, score]
+    );
+
+    const candidate = rows[0];
+    if (!candidate) return;
+
+    await logMessage(candidate.id, 'inbound', 'email', rawSource);
+
+    // Threshold: score ≥50 to proceed
+    const threshold = 50;
+    if (score < threshold) {
+      await query(`UPDATE candidates SET state = 'rejected', updated_at = now() WHERE id = $1`, [candidate.id]);
+      await notify(`❌ Indeed: auto-declined *${name}* (score: ${score}/100) — ${reasoning}`);
+      return;
+    }
+
+    const hasResume = resumeText.length >= 100;
+
+    if (phone) {
+      const posTitle = position?.title ?? 'Sales Rep';
+      const questions: Array<{ question: string }> = (position?.knockout_questions ?? []) as Array<{ question: string }>;
+      const firstQuestion = questions[0]?.question;
+
+      const smsBody = await generateInitialSMS(name, posTitle, resumeText, firstQuestion, hasResume).catch(() => {
+        const firstName = name.split(' ')[0];
+        const fallbackQ = firstQuestion ? ` Quick question — ${firstQuestion}` : '';
+        const fallbackResume = !hasResume ? ` Also, feel free to text or email your resume or LinkedIn whenever you get a chance.` : '';
+        return `Hey ${firstName}! Hunter here from Frontline Adjusters — saw your Indeed application for ${posTitle}.${fallbackQ}${fallbackResume}`;
+      });
+
+      await queueForApproval(candidate.id, name, phone, posTitle, '', smsBody).catch(console.error);
+      await query(`UPDATE candidates SET state = 'sms_sent', updated_at = now() WHERE id = $1`, [candidate.id]);
+      await notify(`📨 Indeed candidate: *${name}* (${posTitle}, score: ${score}/100) — pending approval`);
+    } else {
+      await notify(`📨 Indeed candidate: *${name}* (score: ${score}/100) — no phone number provided`);
+    }
+  } catch (err) {
+    console.error('Indeed webhook processing error:', err);
+  }
 }
 
 export default webhooks;

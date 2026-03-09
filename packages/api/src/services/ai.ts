@@ -258,13 +258,18 @@ export async function generateInitialSMS(
   name: string,
   positionTitle: string,
   resumeText: string,
-  firstKnockoutQuestion?: string
+  firstKnockoutQuestion?: string,
+  hasResume?: boolean
 ): Promise<string> {
   const firstName = name.split(' ')[0];
 
   const questionInstruction = firstKnockoutQuestion
     ? `End the message by asking this knockout question conversationally (not as a checkbox): "${firstKnockoutQuestion}"`
     : `End with a warm, open-ended invitation to chat — something like "Would love to connect if you're still interested!" or similar.`;
+
+  const resumeInstruction = hasResume === false
+    ? `- At the end of the opening message, after the first knockout question, add a casual line asking them to text or email their resume or LinkedIn profile. Keep it natural, not demanding.`
+    : '';
 
   const feedbackExamples = await getFeedbackExamples();
 
@@ -279,10 +284,10 @@ export async function generateInitialSMS(
 
 Rules:
 - 2-3 sentences total — keep it tight
-- Reference something SPECIFIC from their application or resume: a real previous employer, a skill, their city, a credential — something that proves you actually read it. Do NOT make things up — only reference what's there.
+- Reference something SPECIFIC from their application or resume: a real previous employer, a skill, their city, a credential — something that proves you actually read it. Do NOT make things up — only reference what's there. If there's nothing specific to reference, keep it warm and genuine.
 - Do NOT include a "Reply YES to continue" gate or any opt-in prompt — skip it entirely
 - Do NOT say "Super excited" or use corporate filler
-- ${questionInstruction}
+- ${questionInstruction}${resumeInstruction ? `\n- ${resumeInstruction.slice(2)}` : ''}
 - Write like a real human texting from their phone, not a corporate template
 - Sign as Hunter
 
@@ -301,7 +306,8 @@ Write the SMS now (just the message text, nothing else):`,
 
   // Fallback: generic but still skips the gate
   const fallbackQ = firstKnockoutQuestion ? ` Quick question — ${firstKnockoutQuestion}` : '';
-  return `Hey ${firstName}! Hunter here from Frontline Adjusters — saw your application for the ${positionTitle} role.${fallbackQ}`;
+  const fallbackResume = hasResume === false ? ` Also, feel free to text or email over your resume or LinkedIn whenever you get a chance.` : '';
+  return `Hey ${firstName}! Hunter here from Frontline Adjusters — saw your application for the ${positionTitle} role.${fallbackQ}${fallbackResume}`;
 }
 
 export async function generateUnsureResponse(question: string): Promise<string> {
