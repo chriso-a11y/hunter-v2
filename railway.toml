@@ -8,3 +8,8 @@ dockerfile = "Dockerfile.api"
 [[services]]
 name = "hunter-web"
 dockerfile = "Dockerfile.web"
+
+[[crons]]
+name = "flush-pending"
+schedule = "*/30 * * * *"
+command = "curl -s -X GET https://hunter-api-production-b19a.up.railway.app/api/telegram/flush-pending -H 'Authorization: Bearer hunter2026'"
